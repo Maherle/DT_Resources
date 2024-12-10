@@ -1,0 +1,213 @@
+metadata:
+  version: "1"
+  dependencies:
+    apps:
+      - id: dynatrace.automations
+        version: ^1.1104.3
+  inputs: []
+workflow:
+  title: Ingest Github Runner Data
+  tasks:
+    get_billing:
+      name: get_billing
+      description: Issue an HTTP request to any API
+      action: dynatrace.automations:http-function
+      input:
+        url: https://api.github.com/users/<REPO OWNER/settings/billing/actions
+        method: GET
+        credential:
+          type: token
+          tokenPrefix: Bearer
+          credentialId: CREDENTIALS_VAULT-058A6F04965BE5E1
+        failOnResponseCodes: 400-599
+      position:
+        x: 1
+        y: 1
+      predecessors: []
+      conditions:
+        states: {}
+    send_biz_events:
+      name: send_biz_events
+      description: Build a custom task running js Code
+      action: dynatrace.automations:run-javascript
+      input:
+        script: >-
+          import { execution } from '@dynatrace-sdk/automation-utils';
+
+
+          function flattenJSON(data, result = {}) {
+            for (const key in data) {
+              if (typeof data[key] === 'object' && !Array.isArray(data[key]) && data[key] !== null) {
+                flattenJSON(data[key], result);
+              } else {
+                result[key] = data[key];
+              }
+            }
+            return result;
+          }
+
+
+          function filterFields(jsonArray, fieldsToKeep) {
+            return jsonArray.map(item => {
+              let filteredItem = {};
+              fieldsToKeep.forEach(field => {
+                if (item.hasOwnProperty(field)) {
+                  filteredItem[field] = item[field];
+                }
+              });
+              return filteredItem;
+            });
+          }
+
+
+          function jsonToList(jsonObject) {
+            const result = [];
+            for (const key in jsonObject) {
+              if (jsonObject.hasOwnProperty(key)) {
+                result.push({ "event.provider": "git","event.type": "billing" ,host: key, time: jsonObject[key] });
+              }
+            }
+            return result;
+          }
+
+
+          export default async function ({ execution_id }) {
+            var ex = await execution(execution_id);
+            
+            var billing_result = await ex.result('get_billing');
+            var self_hosted = await ex.result('get_self_hosted_runners');
+            var app_runners = await ex.result('get_application_runners');
+            var workflow_runs = await ex.result('get_workflow_runs');
+            
+            billing_result = flattenJSON(billing_result.json);
+            self_hosted = filterFields(self_hosted.json.runners,["id","name","os","status"])
+            app_runners = filterFields(app_runners.json,["os","architecture"])
+            workflow_runs = filterFields(workflow_runs.json["workflow_runs"],["id","name","status","run_started_at"])  
+            
+            billing_result = jsonToList(billing_result);
+            
+            self_hosted = self_hosted.map(item=> ({
+              ...item,
+              "event.provider": "git",
+              "event.type": "self_hosted"
+            }));
+            
+            app_runners = app_runners.map(item=> ({
+              ...item,
+              "event.provider": "git",
+              "event.type": "app_runner"
+            }));
+
+            workflow_runs = workflow_runs.map(item=> ({
+              ...item,
+              "event.provider": "git",
+              "event.type": "workflow_runs"
+            }));
+            
+            const bill_result = await fetch('/platform/classic/environment-api/v2/bizevents/ingest', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(billing_result)
+            });
+
+            const self_hosted_result = await fetch('/platform/classic/environment-api/v2/bizevents/ingest', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(self_hosted)
+            });
+
+            const app_runners_result = await fetch('/platform/classic/environment-api/v2/bizevents/ingest', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(app_runners)
+            });
+
+            const workflow_runs_result = await fetch('/platform/classic/environment-api/v2/bizevents/ingest', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(workflow_runs)
+            });
+
+            
+          }
+      position:
+        x: 0
+        y: 2
+      predecessors:
+        - get_self_hosted_runners
+        - get_billing
+        - get_application_runners
+        - get_workflow_runs
+      conditions:
+        states:
+          get_billing: SUCCESS
+          get_workflow_runs: SUCCESS
+          get_application_runners: SUCCESS
+          get_self_hosted_runners: SUCCESS
+    get_workflow_runs:
+      name: get_workflow_runs
+      description: Issue an HTTP request to any API
+      action: dynatrace.automations:http-function
+      input:
+        url: https://api.github.com/repos/<REPO OWNER>/<REPO>/actions/runs
+        method: GET
+        credential:
+          type: token
+          tokenPrefix: Bearer
+          credentialId: CREDENTIALS_VAULT-058A6F04965BE5E1
+        failOnResponseCodes: 400-599
+      position:
+        x: -2
+        y: 1
+      predecessors: []
+    get_application_runners:
+      name: get_application_runners
+      description: Issue an HTTP request to any API
+      action: dynatrace.automations:http-function
+      input:
+        url: https://api.github.com/repos/<REPO OWNER>/<REPO>/actions/runners/downloads
+        method: GET
+        credential:
+          type: token
+          tokenPrefix: Bearer
+          credentialId: CREDENTIALS_VAULT-058A6F04965BE5E1
+        failOnResponseCodes: 400-599
+      position:
+        x: -1
+        y: 1
+      predecessors: []
+      conditions:
+        states: {}
+    get_self_hosted_runners:
+      name: get_self_hosted_runners
+      description: Issue an HTTP request to any API
+      action: dynatrace.automations:http-function
+      input:
+        url: https://api.github.com/repos/<REPO OWNER>/<REPO>/actions/runners
+        method: GET
+        credential:
+          type: token
+          tokenPrefix: Bearer
+          credentialId: CREDENTIALS_VAULT-058A6F04965BE5E1
+        failOnResponseCodes: 400-599
+      position:
+        x: 2
+        y: 1
+      predecessors: []
+      conditions:
+        states: {}
+  description: ""
+  trigger:
+    schedule:
+      rule: null
+      trigger:
+        type: cron
+        cron: "*/10  * * * *"
+      timezone: America/Denver
+      isActive: true
+      isFaulty: false
+      nextExecution: 2024-12-10T22:00:00.000Z
+      filterParameters: {}
+      inputs: {}
+  schemaVersion: 3
+  type: STANDARD
